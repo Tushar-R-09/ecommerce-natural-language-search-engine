@@ -1,0 +1,36 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+
+metadata:
+  name: streamlit-ingress
+  annotations:
+    # Enable WebSocket support for Streamlit real-time UI streaming
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/websocket-services: "streamlit"
+
+    # Automated TLS/SSL certificate issuance via cert-manager (Let's Encrypt)
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+    # Enforce HTTPS redirect
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+
+spec:
+  ingressClassName: nginx
+
+  rules:
+    - host: search.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: streamlit
+                port:
+                  number: 8501
+
+  tls:
+    - hosts:
+        - search.example.com
+      secretName: streamlit-tls-secret

@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: StatefulSet
+
+metadata:
+  name: qdrant
+
+spec:
+  serviceName: qdrant-headless
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: qdrant
+
+  template:
+    metadata:
+      labels:
+        app: qdrant
+
+    spec:
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:latest
+
+          ports:
+            - containerPort: 6333
+              name: http
+            - containerPort: 6334
+              name: grpc
+
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 6333
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 6333
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+
+          volumeMounts:
+            - name: qdrant-storage
+              mountPath: /qdrant/storage
+
+      volumes:
+        - name: qdrant-storage
+          persistentVolumeClaim:
+            claimName: qdrant-storage

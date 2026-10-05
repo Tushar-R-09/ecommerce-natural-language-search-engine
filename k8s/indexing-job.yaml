@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: Job
+
+metadata:
+  name: qdrant-indexing
+
+spec:
+  template:
+    metadata:
+      labels:
+        app: qdrant-indexing
+
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+
+      containers:
+        - name: indexer
+          image: natural-language-search:latest
+          imagePullPolicy: IfNotPresent
+
+          envFrom:
+            - configMapRef:
+                name: search-engine-config
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "3.5Gi"
+
+          volumeMounts:
+            - name: dataset
+              mountPath: /app/data
+
+          command:
+            - uv
+            - run
+            - python
+            - scripts/02_create_quadrant_index.py
+
+      volumes:
+        - name: dataset
+          hostPath:
+            path: /mnt/data
+            type: Directory

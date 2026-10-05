@@ -1,0 +1,5 @@
+project-includes = [
+    "src/**/*.py*",
+    "scripts/**/*.py*",
+    "main.py",
+]

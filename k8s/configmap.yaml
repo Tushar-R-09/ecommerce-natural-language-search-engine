@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+
+metadata:
+  name: search-engine-config
+
+data:
+  QDRANT_HOST: "qdrant"
+  QDRANT_PORT: "6333"
+  PYTHONPATH: "/app"

@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: qdrant
+
+spec:
+  selector:
+    app: qdrant
+
+  ports:
+    - name: http
+      protocol: TCP
+      port: 6333
+      targetPort: 6333
+
+    - name: grpc
+      protocol: TCP
+      port: 6334
+      targetPort: 6334
+
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: qdrant-headless
+
+spec:
+  clusterIP: None
+  selector:
+    app: qdrant
+
+  ports:
+    - name: http
+      protocol: TCP
+      port: 6333
+      targetPort: 6333
+
+    - name: grpc
+      protocol: TCP
+      port: 6334
+      targetPort: 6334

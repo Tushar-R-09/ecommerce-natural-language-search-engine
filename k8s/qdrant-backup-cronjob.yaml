@@ -1,0 +1,34 @@
+apiVersion: batch/v1
+kind: CronJob
+
+metadata:
+  name: qdrant-snapshot-backup
+
+spec:
+  schedule: "0 2 * * *" # Runs daily at 2:00 AM UTC
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: snapshot-trigger
+              image: curlimages/curl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Triggering point-in-time snapshot for collection 'semantic_search'..."
+                  curl -fsS -X POST "http://qdrant:6333/collections/semantic_search/snapshots"
+                  echo "✅ Snapshot created successfully."
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "200m"
+                  memory: "128Mi"
