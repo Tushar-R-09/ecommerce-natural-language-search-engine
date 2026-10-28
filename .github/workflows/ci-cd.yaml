@@ -49,12 +49,11 @@ jobs:
           uv run python -m py_compile $(find src app scripts -name "*.py")
 
       - name: Validate Kubernetes Manifests with Kubeconform
-        uses: yannh/kubeconform-action@v0.1.0
-        with:
-          k8s_version: "1.30.0"
-          files: "k8s/*.yaml"
-          ignore_filename_patterns: "kind-config.yaml"
-          schema_locations: "default"
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar -xz
+          chmod +x kubeconform
+          sudo mv kubeconform /usr/local/bin/
+          kubeconform -summary -ignore-filename-pattern "kind-config.yaml" k8s/
 
   # ==========================================
   # 2. Container Build & Push to GHCR
@@ -66,6 +65,10 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Set lowercased image name
+        run: |
+          echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
