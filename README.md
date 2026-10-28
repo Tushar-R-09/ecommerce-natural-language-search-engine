@@ -64,13 +64,11 @@ natural_language_search_engine/
 │   ├── indexing-job.yaml                # Batch vector indexing Job
 │   ├── kind-config.yaml                 # Local Kind cluster configuration
 │   ├── network-policy.yaml              # Zero-Trust database isolation policy
-│   ├── qdrant-backup-cronjob.yaml       # Automated daily snapshot backup CronJob
 │   ├── qdrant-pvc.yaml                  # Qdrant PersistentVolumeClaim
 │   ├── qdrant-service.yaml              # Qdrant ClusterIP & Headless services
 │   ├── qdrant-statefulset.yaml          # Qdrant database StatefulSet
 │   ├── streamlit-deployment.yaml        # Streamlit multi-replica Deployment
 │   ├── streamlit-hpa.yaml               # HorizontalPodAutoscaler (2-5 replicas)
-│   ├── streamlit-ingress.yaml           # Ingress with WebSocket & TLS/SSL support
 │   ├── streamlit-pdb.yaml               # PodDisruptionBudget (minAvailable: 1)
 │   └── streamlit-service.yaml           # Streamlit internal ClusterIP service
 ├── notebooks/                           # Exploratory data analysis & experiments
@@ -195,191 +193,305 @@ docker start semantic-search
 
 ## ☸️ Kubernetes Cluster Setup (Kind)
 
-1. **Create the Kind cluster:**
+Follow these steps sequentially to deploy the entire search engine architecture onto a local Kubernetes (Kind) cluster. Every step includes the exact command, what it does behind the scenes, and how to verify it.
+
+---
+
+### Step 1: Create the Kind Cluster with Host Data Mount
+Create a local Kubernetes cluster named `semantic-search` using the custom multi-node Kind configuration in [`k8s/kind-config.yaml`](k8s/kind-config.yaml).
 ```bash
 kind create cluster --name semantic-search --config k8s/kind-config.yaml
 ```
+- **What this does:**
+  - Provisions a local Docker-in-Docker Kubernetes control-plane node.
+  - Mounts your local dataset directory (`$(pwd)/data`) directly into the Kind control-plane container at `/mnt/data`, allowing batch indexing jobs to access Parquet embeddings without uploading them to cloud storage.
 
-2. **Verify cluster, nodes, and host mount:**
+---
+
+### Step 2: Verify Cluster Health and Node Mount
+Ensure the Kubernetes control plane is healthy and verify the local host dataset mount inside the Kind node:
 ```bash
+# Verify cluster control-plane connectivity
 kubectl cluster-info
+
+# Verify node is in Ready state
 kubectl get nodes
 
-# Verify host data mount inside Kind control-plane node
+# Confirm dataset files are visible inside the Kind node
 docker exec semantic-search-control-plane ls -lah /mnt/data
 ```
+- **What this does:**
+  - `kubectl cluster-info`: Checks that the Kubernetes API server and CoreDNS are operational.
+  - `kubectl get nodes`: Confirms that the `semantic-search-control-plane` node is active and ready to schedule pods.
+  - `docker exec ...`: Verifies that the Parquet batch files from your host machine are accessible at `/mnt/data` inside the node.
 
-3. **Build and load local Docker image into Kind:**
+---
+
+### Step 3: Build the Application Docker Image
+Build the hardened, non-root Docker container image for the search application:
 ```bash
-# Build the application image with version tag and latest tag
 docker build -t natural-language-search:v1.0.0 -t natural-language-search:latest .
+```
+- **What this does:**
+  - Packages the Streamlit application, retrieval modules, preprocessing pipeline, and dependencies using `uv`.
+  - Runs `scripts/download_models.py` during build time to pre-cache transformer models (`BAAI/bge-base-en-v1.5` and `ms-marco-MiniLM-L-6-v2`) inside `/app/.cache/huggingface`, ensuring pods start instantly without downloading weights from Hugging Face at runtime.
+  - Configures non-root user `appuser` (UID 1000) for container security.
 
-# Verify non-root user and pre-cached ML models
+---
+
+### Step 4: Verify the Built Image Security & Offline Cache
+Verify non-root execution and cached models before sideloading to Kubernetes:
+```bash
+# Verify non-root execution (UID 1000)
 docker run --rm natural-language-search:latest whoami
+
+# Verify pre-cached model weights
 docker run --rm natural-language-search:latest ls -lh /app/.cache/huggingface/hub
+```
+- **What this does:**
+  - Confirms the container enforces least-privilege security (`appuser`).
+  - Confirms that model snapshots exist in the image filesystem so pods can run offline and survive air-gapped environments.
 
-# Verify image contents
-docker run --rm natural-language-search:latest ls -l /app/scripts
+---
 
-# Load image into Kind cluster
+### Step 5: Sideload Docker Image into the Kind Cluster
+Transfer the newly built local Docker image into the Kind cluster node:
+```bash
 kind load docker-image natural-language-search:latest --name semantic-search
 ```
+- **What this does:**
+  - Copies the local Docker image directly into the Kind node's internal `containerd` container runtime.
+  - Eliminates the need to push images to an external registry like Docker Hub or GitHub Packages (`imagePullPolicy: IfNotPresent` will use this cached image).
 
-Verify the image is loaded inside the Kind node:
+---
+
+### Step 6: Verify Image inside Kind Container Runtime
+Confirm that the Kind node's `containerd` runtime successfully registered the image:
 ```bash
 docker exec -it semantic-search-control-plane crictl images | grep natural-language-search
 ```
+- **What this does:**
+  - Queries `crictl` (Container Runtime Interface CLI) inside the Kind node to guarantee that `natural-language-search:latest` is present and ready for Kubernetes pod scheduling.
 
-4. **Deploy Application ConfigMap:**
+---
+
+### Step 7: Deploy Central Application ConfigMap
+Apply the centralized environment variables configuration defined in [`k8s/configmap.yaml`](k8s/configmap.yaml):
 ```bash
 kubectl apply -f k8s/configmap.yaml
 ```
+- **What this does:**
+  - Creates the `search-engine-config` ConfigMap containing environment variables: `QDRANT_HOST=qdrant`, `QDRANT_PORT=6333`, `COLLECTION_NAME=semantic_search`, `EMBEDDING_MODEL_NAME`, and `RERANKER_MODEL_NAME`.
+- **Verification:**
+  ```bash
+  kubectl get configmap search-engine-config -o yaml
+  ```
 
-To verify the ConfigMap:
-```bash
-kubectl get configmap search-engine-config -o yaml
-```
+---
 
-5. **Deploy Qdrant Storage (PersistentVolumeClaim):**
+### Step 8: Provision Qdrant PersistentVolumeClaim (PVC)
+Deploy the persistent disk volume claim defined in [`k8s/qdrant-pvc.yaml`](k8s/qdrant-pvc.yaml):
 ```bash
 kubectl apply -f k8s/qdrant-pvc.yaml
 ```
+- **What this does:**
+  - Requests a 10Gi PersistentVolume via the default `standard` StorageClass in Kind (host-path provisioner).
+  - Guarantees that vector embeddings and collection indexes persist across Qdrant pod restarts or node upgrades.
+- **Verification:**
+  ```bash
+  kubectl get pvc qdrant-storage
+  ```
 
-To verify the PVC and StorageClass:
-```bash
-kubectl get pvc
-kubectl get storageclass
-```
+---
 
-6. **Deploy Qdrant Services (ClusterIP & Headless):**
+### Step 9: Deploy Qdrant Networking Services (ClusterIP & Headless)
+Deploy the internal Kubernetes services defined in [`k8s/qdrant-service.yaml`](k8s/qdrant-service.yaml):
 ```bash
 kubectl apply -f k8s/qdrant-service.yaml
 ```
+- **What this does:**
+  - Creates the `qdrant` ClusterIP service routing traffic to port 6333 (HTTP REST API) and port 6334 (gRPC).
+  - Creates the `qdrant-headless` headless service (`clusterIP: None`) for stable network identities required by the Qdrant StatefulSet.
+- **Verification:**
+  ```bash
+  kubectl get svc -l app=qdrant
+  ```
 
-To verify the services:
-```bash
-kubectl get svc
-```
+---
 
-7. **Deploy Qdrant Database (StatefulSet):**
+### Step 10: Deploy Qdrant Vector Database (StatefulSet)
+Launch the Qdrant database StatefulSet defined in [`k8s/qdrant-statefulset.yaml`](k8s/qdrant-statefulset.yaml):
 ```bash
 kubectl apply -f k8s/qdrant-statefulset.yaml
 ```
+- **What this does:**
+  - Starts the single-replica Qdrant database pod (`qdrant-0`).
+  - Mounts the `qdrant-storage` PVC to `/qdrant/storage`.
+  - Configures container resource limits (CPU requests `200m`, limits `1000m`; Memory requests `512Mi`, limits `2Gi`) and liveness/readiness probes targeting `/healthz` and `/readyz`.
 
-To verify Qdrant is running:
+---
+
+### Step 11: Wait for Qdrant Pod to be Ready
+Ensure the Qdrant database is fully initialized before attempting to index vectors or connect the web app:
 ```bash
-kubectl get statefulset
+# Monitor StatefulSet rollout until completed
+kubectl rollout status statefulset/qdrant
+
+# Verify pod status is 1/1 Running
 kubectl get pods -l app=qdrant
 ```
+- **What this does:**
+  - Blocks until the readiness probe passes (`1/1 Running`), confirming Qdrant is accepting connections on port 6333.
 
-8. **Deploy Automated Snapshot Backup (CronJob):**
-```bash
-kubectl apply -f k8s/qdrant-backup-cronjob.yaml
-```
+---
 
-To verify the CronJob or trigger a manual snapshot test:
-```bash
-kubectl get cronjob
-kubectl create job --from=cronjob/qdrant-snapshot-backup manual-backup-test
-kubectl logs job/manual-backup-test
-```
-
-9. **Deploy the Streamlit application:**
-```bash
-kubectl apply -f k8s/streamlit-deployment.yaml
-```
-
-To verify the deployment and pod status:
-```bash
-kubectl get deployments
-kubectl get pods
-```
-
-To inspect pod details or view logs:
-```bash
-kubectl describe pod <pod-name>
-kubectl logs <pod-name>
-```
-
-To test DNS resolution and connectivity to the Qdrant service from inside the Streamlit pod:
-```bash
-# Verify DNS resolution
-kubectl exec -it <streamlit-pod-name> -- python -c "import socket; print(socket.gethostbyname('qdrant'))"
-
-# Verify HTTP API connectivity to Qdrant
-kubectl exec -it <streamlit-pod-name> -- \
-  python -c "import urllib.request; print(urllib.request.urlopen('http://qdrant:6333/collections').read().decode())"
-```
-
-10. **Deploy High Availability Policies (PDB & HPA):**
-```bash
-# Apply PodDisruptionBudget (guarantees >= 1 replica during maintenance)
-kubectl apply -f k8s/streamlit-pdb.yaml
-
-# Apply HorizontalPodAutoscaler (auto-scales 2 to 5 replicas)
-kubectl apply -f k8s/streamlit-hpa.yaml
-```
-
-To verify high availability status:
-```bash
-kubectl get pdb
-kubectl get hpa
-```
-
-11. **Expose the Streamlit Service (ClusterIP):**
-```bash
-kubectl apply -f k8s/streamlit-service.yaml
-```
-
-To verify the service:
-```bash
-kubectl get svc streamlit
-```
-
-12. **Deploy Ingress and Zero-Trust NetworkPolicy:**
-```bash
-# Apply production Ingress with WebSocket and TLS/SSL annotations
-kubectl apply -f k8s/streamlit-ingress.yaml
-
-# Apply NetworkPolicy isolating Qdrant database access to authorized pods
-kubectl apply -f k8s/network-policy.yaml
-```
-
-To verify Ingress and NetworkPolicy:
-```bash
-kubectl get ingress
-kubectl get networkpolicy
-```
-
-13. **Run Qdrant Indexing Job:**
-Execute the batch indexing job to index dataset embeddings into Qdrant inside the cluster:
+### Step 12: Run the Batch Vector Indexing Job
+Populate Qdrant with your dataset embeddings by running the Kubernetes Job defined in [`k8s/indexing-job.yaml`](k8s/indexing-job.yaml):
 ```bash
 kubectl apply -f k8s/indexing-job.yaml
 ```
+- **What this does:**
+  - Spawns a dedicated batch indexing pod (`qdrant-indexing-*`) with `restartPolicy: Never`.
+  - Mounts `/mnt/data` from the Kind node to `/app/data` inside the pod.
+  - Executes `python scripts/02_create_quadrant_index.py` using `uv`, which creates the Qdrant collection and inserts all Parquet vector batches into `http://qdrant:6333`.
 
-To monitor the job and view logs:
+---
+
+### Step 13: Monitor Indexing Job Progress & Logs
+Stream the indexing logs in real-time until all batches are uploaded:
 ```bash
-kubectl get jobs
+# Stream indexing logs
 kubectl logs -f -l app=qdrant-indexing
-```
 
-To delete or reset the indexing job (e.g., before re-running):
+# Verify job status shows 1/1 Completions
+kubectl get job qdrant-indexing
+```
+- **What this does:**
+  - Follows the output as batches are converted and inserted into the `semantic_search` collection.
+  - When finished, you should see `✅ Done!` and the Job status will display `COMPLETIONS: 1/1`.
+
+---
+
+### Step 14: Deploy the Streamlit Application Service
+Expose the Streamlit web application internally using the service in [`k8s/streamlit-service.yaml`](k8s/streamlit-service.yaml):
 ```bash
-kubectl delete job qdrant-indexing
+kubectl apply -f k8s/streamlit-service.yaml
 ```
+- **What this does:**
+  - Creates the `streamlit` ClusterIP service routing traffic on port 8501 to pods matching `app: streamlit`.
+- **Verification:**
+  ```bash
+  kubectl get svc streamlit
+  ```
 
-14. **Access the Streamlit Web UI:**
-Port-forward the service to access the application locally:
+---
+
+### Step 15: Deploy the Streamlit Application Pods
+Deploy the multi-replica Streamlit frontend defined in [`k8s/streamlit-deployment.yaml`](k8s/streamlit-deployment.yaml):
+```bash
+kubectl apply -f k8s/streamlit-deployment.yaml
+```
+- **What this does:**
+  - Deploys 2 replicas of the search UI container.
+  - Enforces `RollingUpdate` strategy (`maxSurge: 1`, `maxUnavailable: 0`) for zero-downtime updates.
+  - Injects environment variables from `search-engine-config` ConfigMap.
+  - Enforces non-root security context (UID 1000) and configures liveness and readiness probes targeting `/_stcore/health`.
+
+---
+
+### Step 16: Verify Application Rollout & Database Connectivity
+Confirm that both Streamlit replicas are running and test connectivity to Qdrant:
+```bash
+# Wait for deployment rollout to finish
+kubectl rollout status deployment/streamlit
+
+# Verify all pods are in Running state
+kubectl get pods -l app=streamlit
+
+# Test DNS and HTTP communication from inside a Streamlit pod to Qdrant
+STREAMLIT_POD=$(kubectl get pod -l app=streamlit -o jsonpath="{.items[0].metadata.name}")
+kubectl exec -it "$STREAMLIT_POD" -- python -c "import urllib.request; print(urllib.request.urlopen('http://qdrant:6333/collections').read().decode())"
+```
+- **What this does:**
+  - Confirms the deployment reaches `2/2` ready pods.
+  - Tests internal cluster DNS resolution (`qdrant:6333`) and queries Qdrant directly from within the Streamlit pod to verify collection status.
+
+---
+
+### Step 17: Deploy High Availability Policies (PDB & HPA)
+Apply the PodDisruptionBudget and HorizontalPodAutoscaler manifests for production reliability:
+```bash
+# 1. Apply PodDisruptionBudget (guarantees >= 1 replica available during node maintenance)
+kubectl apply -f k8s/streamlit-pdb.yaml
+
+# 2. Apply HorizontalPodAutoscaler (auto-scales 2 to 5 replicas based on CPU/Memory)
+kubectl apply -f k8s/streamlit-hpa.yaml
+```
+- **What this does:**
+  - `streamlit-pdb.yaml`: Ensures that voluntarily evicting pods during cluster upgrades will never drop active replicas below 1.
+  - `streamlit-hpa.yaml`: Configures the Kubernetes Horizontal Pod Autoscaler to dynamically scale replicas between 2 and 5 based on 70% CPU or 80% memory utilization.
+- **Verification:**
+  ```bash
+  kubectl get pdb streamlit-pdb
+  kubectl get hpa streamlit-hpa
+  ```
+
+---
+
+### Step 18: Deploy Zero-Trust Network Isolation Policy
+Enforce network traffic restrictions using the policy defined in [`k8s/network-policy.yaml`](k8s/network-policy.yaml):
+```bash
+kubectl apply -f k8s/network-policy.yaml
+```
+- **What this does:**
+  - Implements a Zero-Trust security perimeter around the Qdrant vector database.
+  - Blocks all inbound traffic to Qdrant ports 6333 and 6334 *except* from pods labeled `app: streamlit` and `app: qdrant-indexing`.
+- **Verification:**
+  ```bash
+  kubectl get networkpolicy qdrant-network-policy
+  ```
+
+---
+
+### Step 19: Access the Streamlit Search Web UI Locally
+Port-forward the Streamlit service from inside the Kubernetes cluster to your local machine:
 ```bash
 kubectl port-forward service/streamlit 8501:8501
 ```
+- **What this does:**
+  - Binds Kubernetes ClusterIP port `8501` to `localhost:8501` on your host machine.
+- **Open your browser and navigate to:**
+  👉 **[http://localhost:8501](http://localhost:8501)**
 
-- **Streamlit Web UI:** [http://localhost:8501](http://localhost:8501)
+Test searches such as:
+- *"wireless noise cancelling headphones with deep bass"*
+- *"mechanical gaming keyboard with rgb"*
 
-To delete the cluster when needed:
-```bash
-kind delete cluster --name semantic-search
-```
+---
+
+### Cluster Maintenance & Teardown Commands
+
+- **Check all resources in the cluster:**
+  ```bash
+  kubectl get all
+  ```
+
+- **Re-run the Indexing Job:**
+  Before running the indexing job again, delete the completed job:
+  ```bash
+  kubectl delete job qdrant-indexing
+  kubectl apply -f k8s/indexing-job.yaml
+  ```
+
+- **Restart Streamlit pods (Rolling restart):**
+  ```bash
+  kubectl rollout restart deployment/streamlit
+  ```
+
+- **Delete the entire Kind cluster and cleanup:**
+  ```bash
+  kind delete cluster --name semantic-search
+  ```
 
 ---
 
